@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RF Spectrum Waterfall</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="panel">
+    <h1>RF Waterfall</h1>
+
+    <div id="status">
+      <span class="dot"></span>
+      <span id="statusText">connecting…</span>
+    </div>
+    <div id="errorMsg"></div>
+
+    <hr />
+
+    <div class="field">
+      <label for="endpoint">ZeroMQ SUB endpoint</label>
+      <input id="endpoint" type="text" value="tcp://localhost:5555" />
+    </div>
+
+    <button id="applyBtn">Apply / reconnect</button>
+
+    <hr />
+
+    <div class="field">
+      <label>Detected format</label>
+      <div id="detectedInfo" class="hint">waiting for data…</div>
+    </div>
+
+    <div class="field" id="channelField" hidden>
+      <label for="channelSelect">Display RF channel</label>
+      <select id="channelSelect"></select>
+    </div>
+
+    <hr />
+
+    <div class="field">
+      <label for="plotType">Plot type</label>
+      <select id="plotType">
+        <option value="waterfall">Spectrum waterfall</option>
+        <option value="magnitude">Magnitude frame</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="minDb">Min dB</label>
+        <input id="minDb" type="number" value="-40" />
+      </div>
+      <div class="field">
+        <label for="maxDb">Max dB</label>
+        <input id="maxDb" type="number" value="40" />
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="historyRows"><span id="historyLabel">History rows (waterfall)</span></label>
+      <input id="historyRows" type="number" min="16" max="4096" step="1" value="600" />
+    </div>
+
+    <hr />
+    <div class="hint">
+      No ZMQ source yet? Run the bundled mock publisher:<br />
+      <code>python mock_publisher.py --type time --channels 2</code>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="plotHeader">
+      <span id="frameInfo">waiting for data…</span>
+      <span id="fpsInfo"></span>
+    </div>
+    <div id="plotArea">
+      <canvas id="plot"></canvas>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
