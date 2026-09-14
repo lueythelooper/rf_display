@@ -139,3 +139,39 @@ canvas {
 }
 
 .hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
+
+#plotToolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+#plotToolbar button {
+  background: rgba(22, 27, 34, 0.85);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-weight: 500;
+  padding: 6px 10px;
+  font-size: 12px;
+  backdrop-filter: blur(2px);
+}
+#plotToolbar button:hover { background: rgba(48, 54, 61, 0.9); }
+#plotToolbar button.active {
+  background: var(--accent);
+  color: #05101f;
+  border-color: var(--accent);
+}
+
+#plotArea.zoom-active canvas { cursor: crosshair; }
+
+#zoomRectOverlay {
+  position: absolute;
+  border: 1px dashed var(--accent);
+  background: rgba(88, 166, 255, 0.15);
+  pointer-events: none;
+  z-index: 1;
+}
+#zoomRectOverlay[hidden] { display: none; }

@@ -8,6 +8,9 @@ const errorMsg = el("errorMsg");
 const frameInfo = el("frameInfo");
 const fpsInfo = el("fpsInfo");
 const plotArea = el("plotArea");
+const zoomBtn = el("zoomBtn");
+const autoscaleBtn = el("autoscaleBtn");
+const zoomRectOverlay = el("zoomRectOverlay");
 
 const endpointInput = el("endpoint");
 const applyBtn = el("applyBtn");
@@ -25,7 +28,7 @@ const historyRowsInput = el("historyRows");
 // is configured client-side — it's reported back by the server once it has
 // seen the first packet, via "status" websocket messages.
 let ws = null;
-let numBins = null; // spectrum bins per frame == canvas width for the waterfall
+let numBins = null; // spectrum bins per frame reported by the server
 let numRfChannels = null;
 let dataType = null;
 let selectedChannel = 0;
@@ -37,7 +40,29 @@ let frameCount = 0;
 let fpsWindowStart = performance.now();
 let fpsWindowCount = 0;
 
+// Zoom: a bin sub-range (frequency axis, both plot types) and a dB sub-range
+// (amplitude axis — vertical scale on the magnitude plot, color scale on the
+// waterfall). null means "no override, use the full/default value".
+let zoomBinStart = 0;
+let zoomBinEnd = null; // null => numBins
+let zoomMinDb = null; // null => minDbInput.value
+let zoomMaxDb = null; // null => maxDbInput.value
+let zoomModeActive = false;
+let dragState = null; // {startX, startY} in plotArea-relative CSS pixels while dragging
+
 canvas.style.imageRendering = "pixelated";
+
+function effectiveBinRange() {
+  const start = Math.max(0, zoomBinStart);
+  const end = zoomBinEnd == null ? numBins : Math.min(zoomBinEnd, numBins);
+  return [start, Math.max(start + 1, end)];
+}
+
+function effectiveDbRange() {
+  const lo = zoomMinDb == null ? parseFloat(minDbInput.value) : zoomMinDb;
+  const hi = zoomMaxDb == null ? parseFloat(maxDbInput.value) : zoomMaxDb;
+  return [lo, hi];
+}
 
 // ---- colormap (jet-like) ----
 const STOPS = [
@@ -67,7 +92,8 @@ function colormap(t) {
 function setupCanvasForMode() {
   if (!numBins) return; // nothing detected yet
   if (plotType === "waterfall") {
-    canvas.width = numBins;
+    const [bs, be] = effectiveBinRange();
+    canvas.width = be - bs;
     canvas.height = historyRows;
     canvas.style.imageRendering = "pixelated";
     ctx.fillStyle = "#000";
@@ -92,8 +118,10 @@ window.addEventListener("resize", () => {
 });
 
 // ---- rendering ----
-function drawWaterfallRow(mag, minDb, maxDb) {
-  const w = numBins;
+function drawWaterfallRow(fullMag) {
+  const [bs, be] = effectiveBinRange();
+  const [minDb, maxDb] = effectiveDbRange();
+  const w = be - bs;
 
   if (waterfallRow >= historyRows) {
     // shift everything up by one row, discarding the oldest (top) row
@@ -105,7 +133,7 @@ function drawWaterfallRow(mag, minDb, maxDb) {
   const data = imgData.data;
   const range = maxDb - minDb || 1;
   for (let i = 0; i < w; i++) {
-    const t = (mag[i] - minDb) / range;
+    const t = (fullMag[bs + i] - minDb) / range;
     const [r, g, b] = colormap(t);
     const o = i * 4;
     data[o] = r;
@@ -118,15 +146,15 @@ function drawWaterfallRow(mag, minDb, maxDb) {
   if (waterfallRow < historyRows) waterfallRow++;
 }
 
-function drawMagnitude(mag) {
-  if (!mag) return;
+function drawMagnitude(fullMag) {
+  if (!fullMag) return;
   const w = canvas.width;
   const h = canvas.height;
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, w, h);
 
-  const minDb = parseFloat(minDbInput.value);
-  const maxDb = parseFloat(maxDbInput.value);
+  const [bs, be] = effectiveBinRange();
+  const [minDb, maxDb] = effectiveDbRange();
   const range = maxDb - minDb || 1;
 
   // grid
@@ -143,10 +171,10 @@ function drawMagnitude(mag) {
   ctx.strokeStyle = "#58a6ff";
   ctx.lineWidth = Math.max(1, window.devicePixelRatio || 1);
   ctx.beginPath();
-  const n = mag.length;
+  const n = be - bs;
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * w;
-    const t = (mag[i] - minDb) / range;
+    const t = (fullMag[bs + i] - minDb) / range;
     const y = h - Math.min(1, Math.max(0, t)) * h;
     if (i === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
@@ -166,10 +194,12 @@ function handleFrame(mag) {
     fpsWindowStart = now;
   }
   const chLabel = numRfChannels > 1 ? ` · ch${selectedChannel}/${numRfChannels}` : "";
-  frameInfo.textContent = `frame ${frameCount} · ${dataType || "?"} · ${numBins} bins${chLabel}`;
+  const [bs, be] = effectiveBinRange();
+  const zoomLabel = bs !== 0 || be !== numBins ? ` · zoomed [${bs}:${be}]` : "";
+  frameInfo.textContent = `frame ${frameCount} · ${dataType || "?"} · ${numBins} bins${chLabel}${zoomLabel}`;
 
   if (plotType === "waterfall") {
-    drawWaterfallRow(mag, parseFloat(minDbInput.value), parseFloat(maxDbInput.value));
+    drawWaterfallRow(mag);
   } else {
     drawMagnitude(mag);
   }
@@ -213,6 +243,7 @@ function applyStatus(msg) {
 
   if (shapeChanged) {
     errorMsg.textContent = "";
+    resetZoom();
     setupCanvasForMode();
   }
 }
@@ -250,6 +281,107 @@ function connect() {
   };
 }
 
+// ---- zoom tool ----
+function resetZoom() {
+  zoomBinStart = 0;
+  zoomBinEnd = null;
+  zoomMinDb = null;
+  zoomMaxDb = null;
+}
+
+function setZoomMode(active) {
+  zoomModeActive = active;
+  zoomBtn.classList.toggle("active", active);
+  plotArea.classList.toggle("zoom-active", active);
+}
+
+zoomBtn.addEventListener("click", () => setZoomMode(!zoomModeActive));
+
+autoscaleBtn.addEventListener("click", () => {
+  resetZoom();
+  setupCanvasForMode();
+});
+
+function plotAreaFraction(clientX, clientY) {
+  const rect = plotArea.getBoundingClientRect();
+  return {
+    fx: Math.min(1, Math.max(0, (clientX - rect.left) / rect.width)),
+    fy: Math.min(1, Math.max(0, (clientY - rect.top) / rect.height)),
+    rect,
+  };
+}
+
+plotArea.addEventListener("mousedown", (evt) => {
+  if (!zoomModeActive || !numBins) return;
+  dragState = { startX: evt.clientX, startY: evt.clientY };
+  zoomRectOverlay.hidden = false;
+  updateZoomRectOverlay(evt.clientX, evt.clientY, evt.clientX, evt.clientY);
+  evt.preventDefault();
+});
+
+window.addEventListener("mousemove", (evt) => {
+  if (!dragState) return;
+  updateZoomRectOverlay(dragState.startX, dragState.startY, evt.clientX, evt.clientY);
+});
+
+window.addEventListener("mouseup", (evt) => {
+  if (!dragState) return;
+  const { startX, startY } = dragState;
+  dragState = null;
+  zoomRectOverlay.hidden = true;
+
+  const rect = plotArea.getBoundingClientRect();
+  const minPixels = 6;
+  if (Math.abs(evt.clientX - startX) < minPixels && Math.abs(evt.clientY - startY) < minPixels) {
+    return; // treat as a click, not a drag — ignore
+  }
+
+  const a = plotAreaFraction(startX, startY);
+  const b = plotAreaFraction(evt.clientX, evt.clientY);
+  const fx0 = Math.min(a.fx, b.fx);
+  const fx1 = Math.max(a.fx, b.fx);
+  const fy0 = Math.min(a.fy, b.fy);
+  const fy1 = Math.max(a.fy, b.fy);
+
+  // Horizontal drag extent -> bin (frequency) sub-range, for both plot types.
+  const [curBs, curBe] = effectiveBinRange();
+  const span = curBe - curBs;
+  let newBs = curBs + Math.round(fx0 * span);
+  let newBe = curBs + Math.round(fx1 * span);
+  newBs = Math.max(0, Math.min(newBs, numBins - 4));
+  newBe = Math.max(newBs + 4, Math.min(newBe, numBins));
+  zoomBinStart = newBs;
+  zoomBinEnd = newBe;
+
+  // Vertical drag extent -> dB sub-range, only meaningful for the magnitude
+  // plot (its y-axis is amplitude). On the waterfall, y is time, so vertical
+  // drag is ignored there and only the frequency axis zooms.
+  if (plotType === "magnitude") {
+    const [curLo, curHi] = effectiveDbRange();
+    const dbRange = curHi - curLo;
+    const newHi = curHi - fy0 * dbRange;
+    const newLo = curHi - fy1 * dbRange;
+    if (newHi - newLo >= 1) {
+      zoomMinDb = newLo;
+      zoomMaxDb = newHi;
+    }
+  }
+
+  setupCanvasForMode();
+});
+
+function updateZoomRectOverlay(x0, y0, x1, y1) {
+  const rect = plotArea.getBoundingClientRect();
+  const left = Math.min(x0, x1) - rect.left;
+  const top = plotType === "magnitude" ? Math.min(y0, y1) - rect.top : 0;
+  const width = Math.abs(x1 - x0);
+  const height = plotType === "magnitude" ? Math.abs(y1 - y0) : rect.height;
+  zoomRectOverlay.style.left = `${left}px`;
+  zoomRectOverlay.style.top = `${top}px`;
+  zoomRectOverlay.style.width = `${width}px`;
+  zoomRectOverlay.style.height = `${height}px`;
+}
+
 // ---- controls ----
 applyBtn.addEventListener("click", async () => {
   const cfg = {
@@ -270,6 +402,7 @@ applyBtn.addEventListener("click", async () => {
     errorMsg.textContent = "";
     frameCount = 0;
     numBins = null; // reconnecting: format will be re-detected from the next frame
+    resetZoom();
     detectedInfo.textContent = "waiting for data…";
   } catch (e) {
     errorMsg.textContent = "failed to apply config: " + e;
@@ -291,7 +424,7 @@ channelSelect.addEventListener("change", async () => {
     }
     errorMsg.textContent = "";
     selectedChannel = channel;
-    setupCanvasForMode(); // fresh waterfall for the newly selected channel
+    setupCanvasForMode(); // fresh waterfall for the newly selected channel (zoom preserved)
   } catch (e) {
     errorMsg.textContent = "failed to select channel: " + e;
   }
