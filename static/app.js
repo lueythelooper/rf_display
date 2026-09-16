@@ -11,6 +11,7 @@ const plotArea = el("plotArea");
 const zoomBtn = el("zoomBtn");
 const autoscaleBtn = el("autoscaleBtn");
 const zoomRectOverlay = el("zoomRectOverlay");
+const freqAxisEl = el("freqAxis");
 
 const endpointInput = el("endpoint");
 const applyBtn = el("applyBtn");
@@ -32,6 +33,8 @@ let numBins = null; // spectrum bins per frame reported by the server
 let numRfChannels = null;
 let dataType = null;
 let selectedChannel = 0;
+let centerFreqHz = null; // from the packet header; null until the first frame arrives
+let sampleRateHz = null;
 let historyRows = parseInt(historyRowsInput.value, 10);
 let plotType = plotTypeSelect.value;
 let lastMagnitude = null;
@@ -62,6 +65,45 @@ function effectiveDbRange() {
   const lo = zoomMinDb == null ? parseFloat(minDbInput.value) : zoomMinDb;
   const hi = zoomMaxDb == null ? parseFloat(maxDbInput.value) : zoomMaxDb;
   return [lo, hi];
+}
+
+// ---- frequency axis ----
+// Per-bin frequency, matching np.fft.fftshift's convention: the center bin
+// (numBins // 2) corresponds to center_freq_hz, and each bin steps by
+// sample_rate_hz / numBins.
+function binFreq(i) {
+  const centerBin = Math.floor(numBins / 2);
+  return centerFreqHz + (i - centerBin) * (sampleRateHz / numBins);
+}
+
+function formatFreq(hz) {
+  const abs = Math.abs(hz);
+  if (abs >= 1e9) return (hz / 1e9).toFixed(3) + " GHz";
+  if (abs >= 1e6) return (hz / 1e6).toFixed(3) + " MHz";
+  if (abs >= 1e3) return (hz / 1e3).toFixed(3) + " kHz";
+  return hz.toFixed(0) + " Hz";
+}
+
+function pickBinTicks(bs, be, count) {
+  const ticks = [];
+  for (let k = 0; k < count; k++) {
+    const frac = count === 1 ? 0 : k / (count - 1);
+    const bin = Math.round(bs + frac * (be - bs - 1));
+    ticks.push({ bin, frac });
+  }
+  return ticks;
+}
+
+function renderFreqAxisStrip() {
+  freqAxisEl.innerHTML = "";
+  if (!numBins || centerFreqHz == null || sampleRateHz == null) return;
+  const [bs, be] = effectiveBinRange();
+  for (const { bin, frac } of pickBinTicks(bs, be, 6)) {
+    const span = document.createElement("span");
+    span.style.left = `${frac * 100}%`;
+    span.textContent = formatFreq(binFreq(bin));
+    freqAxisEl.appendChild(span);
+  }
 }
 
 // ---- colormap (jet-like) ----
@@ -99,8 +141,13 @@ function setupCanvasForMode() {
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     waterfallRow = 0;
+    plotArea.classList.add("has-freq-axis");
+    freqAxisEl.hidden = false;
+    renderFreqAxisStrip();
   } else {
     canvas.style.imageRendering = "auto";
+    plotArea.classList.remove("has-freq-axis");
+    freqAxisEl.hidden = true;
     resizeMagnitudeCanvas();
   }
 }
@@ -146,6 +193,26 @@ function drawWaterfallRow(fullMag) {
   if (waterfallRow < historyRows) waterfallRow++;
 }
 
+// Draws text with a translucent background chip behind it so axis labels
+// stay legible over a busy trace, regardless of what's underneath.
+function fillTextWithBg(text, x, y) {
+  const metrics = ctx.measureText(text);
+  const ascent = metrics.actualBoundingBoxAscent ?? 8;
+  const descent = metrics.actualBoundingBoxDescent ?? 3;
+  let boxX = x;
+  if (ctx.textAlign === "center") boxX = x - metrics.width / 2;
+  else if (ctx.textAlign === "right") boxX = x - metrics.width;
+  let boxY = y;
+  if (ctx.textBaseline === "middle") boxY = y - ascent;
+  else if (ctx.textBaseline === "bottom") boxY = y - ascent - descent;
+  const pad = 2;
+  const prevFill = ctx.fillStyle;
+  ctx.fillStyle = "rgba(13,17,23,0.75)";
+  ctx.fillRect(boxX - pad, boxY - pad, metrics.width + pad * 2, ascent + descent + pad * 2);
+  ctx.fillStyle = prevFill;
+  ctx.fillText(text, x, y);
+}
+
 function drawMagnitude(fullMag) {
   if (!fullMag) return;
   const w = canvas.width;
@@ -156,20 +223,23 @@ function drawMagnitude(fullMag) {
   const [bs, be] = effectiveBinRange();
   const [minDb, maxDb] = effectiveDbRange();
   const range = maxDb - minDb || 1;
+  const dpr = window.devicePixelRatio || 1;
 
-  // grid
+  // horizontal gridlines
+  const dbTicks = 5;
   ctx.strokeStyle = "rgba(255,255,255,0.08)";
   ctx.lineWidth = 1;
-  for (let g = 0; g <= 4; g++) {
-    const gy = (h * g) / 4;
+  for (let g = 0; g < dbTicks; g++) {
+    const gy = h * (g / (dbTicks - 1));
     ctx.beginPath();
     ctx.moveTo(0, gy);
     ctx.lineTo(w, gy);
     ctx.stroke();
   }
 
+  // trace
   ctx.strokeStyle = "#58a6ff";
-  ctx.lineWidth = Math.max(1, window.devicePixelRatio || 1);
+  ctx.lineWidth = Math.max(1, dpr);
   ctx.beginPath();
   const n = be - bs;
   for (let i = 0; i < n; i++) {
@@ -180,6 +250,29 @@ function drawMagnitude(fullMag) {
     else ctx.lineTo(x, y);
   }
   ctx.stroke();
+
+  // dB axis labels, drawn on top of the trace with a background chip
+  ctx.font = `${10 * dpr}px -apple-system, sans-serif`;
+  ctx.fillStyle = "rgba(230,237,243,0.85)";
+  ctx.textAlign = "left";
+  for (let g = 0; g < dbTicks; g++) {
+    const frac = g / (dbTicks - 1);
+    const gy = h * frac;
+    const dbVal = maxDb - frac * range;
+    ctx.textBaseline = g === 0 ? "top" : g === dbTicks - 1 ? "bottom" : "middle";
+    fillTextWithBg(`${dbVal.toFixed(0)} dB`, 4 * dpr, gy);
+  }
+
+  // frequency axis labels along the bottom
+  if (centerFreqHz != null && sampleRateHz != null) {
+    const ticks = pickBinTicks(bs, be, 6);
+    ctx.textBaseline = "bottom";
+    ticks.forEach(({ bin, frac }, idx) => {
+      const x = frac * w;
+      ctx.textAlign = idx === 0 ? "left" : idx === ticks.length - 1 ? "right" : "center";
+      fillTextWithBg(formatFreq(binFreq(bin)), x, h - 4 * dpr);
+    });
+  }
 }
 
 function handleFrame(mag) {
@@ -216,6 +309,8 @@ function applyStatus(msg) {
   dataType = msg.data_type;
   numRfChannels = msg.num_channels;
   numBins = msg.num_samples;
+  centerFreqHz = msg.center_freq_hz;
+  sampleRateHz = msg.sample_rate_hz;
 
   if (!dataType || !numBins) {
     detectedInfo.textContent = "waiting for data…";
@@ -223,7 +318,11 @@ function applyStatus(msg) {
     return;
   }
 
-  detectedInfo.textContent = `${dataType} · ${numRfChannels} channel${numRfChannels === 1 ? "" : "s"} · ${numBins} samples/ch`;
+  const freqInfo =
+    centerFreqHz != null && sampleRateHz != null
+      ? ` · fc=${formatFreq(centerFreqHz)} · fs=${formatFreq(sampleRateHz)}`
+      : "";
+  detectedInfo.textContent = `${dataType} · ${numRfChannels} channel${numRfChannels === 1 ? "" : "s"} · ${numBins} samples/ch${freqInfo}`;
 
   channelField.hidden = numRfChannels <= 1;
   if (
@@ -245,6 +344,10 @@ function applyStatus(msg) {
     errorMsg.textContent = "";
     resetZoom();
     setupCanvasForMode();
+  } else if (plotType === "waterfall") {
+    // center_freq/sample_rate can change (retune) without the frame shape
+    // changing — refresh the axis labels without resetting scroll history.
+    renderFreqAxisStrip();
   }
 }
 
@@ -402,6 +505,8 @@ applyBtn.addEventListener("click", async () => {
     errorMsg.textContent = "";
     frameCount = 0;
     numBins = null; // reconnecting: format will be re-detected from the next frame
+    centerFreqHz = null;
+    sampleRateHz = null;
     resetZoom();
     detectedInfo.textContent = "waiting for data…";
   } catch (e) {

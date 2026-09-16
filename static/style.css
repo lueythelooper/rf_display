@@ -140,6 +140,36 @@ canvas {
 
 .hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
 
+/* The waterfall canvas is a small stretched bitmap (crisp per-bin pixels),
+   so axis text can't be drawn on it directly without distortion — it gets
+   its own real-DOM-pixel strip instead. The magnitude plot's canvas is
+   already sized to real pixels, so it draws its axes directly. */
+#plotArea.has-freq-axis canvas#plot {
+  height: auto;
+  bottom: 22px;
+}
+
+.axis-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  z-index: 1;
+}
+.axis-strip span {
+  position: absolute;
+  top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.axis-strip span:first-child { transform: translateX(0); }
+.axis-strip span:last-child { transform: translateX(-100%); }
+
 #plotToolbar {
   position: absolute;
   top: 10px;

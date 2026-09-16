@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import struct
 import sys
 from typing import Optional, Set
@@ -19,18 +20,25 @@ from pydantic import BaseModel, field_validator
 app = FastAPI()
 
 # ---- wire protocol -------------------------------------------------------
-# Every ZMQ message starts with a 4-byte little-endian header:
-#   uint16 num_samples   - samples per RF channel
-#   uint8  num_channels  - number of RF channels
-#   uint8  data_type     - 0 = FFT (complex float32 spectrum bins),
-#                           1 = TIME_DOMAIN (complex int16 IQ)
+# Every ZMQ message starts with a 12-byte little-endian header:
+#   float32 center_freq_hz - tuner center frequency, in Hz
+#   float32 sample_rate_hz - sample rate the data was captured/produced at, in Hz
+#   uint16  num_samples    - samples per RF channel
+#   uint8   num_channels   - number of RF channels
+#   uint8   data_type      - 0 = FFT (complex float32 spectrum bins),
+#                             1 = TIME_DOMAIN (complex int16 IQ)
 # followed by num_channels blocks of num_samples complex samples each,
 # channel 0 first (non-interleaved), all little-endian.
+#
+# The frequency axis is derived from center_freq_hz/sample_rate_hz: the
+# center bin (num_samples // 2, matching np.fft.fftshift's convention)
+# corresponds to center_freq_hz, and each bin steps by sample_rate_hz /
+# num_samples.
 DATA_TYPE_FFT = 0
 DATA_TYPE_TIME_DOMAIN = 1
 DATA_TYPE_NAMES = {DATA_TYPE_FFT: "FFT", DATA_TYPE_TIME_DOMAIN: "TIME_DOMAIN"}
 DATA_TYPE_ITEMSIZE = {DATA_TYPE_FFT: 8, DATA_TYPE_TIME_DOMAIN: 4}  # bytes/complex sample
-HEADER = struct.Struct("<HBB")
+HEADER = struct.Struct("<ffHBB")
 
 
 class Config(BaseModel):
@@ -60,6 +68,8 @@ class Detected(BaseModel):
     data_type: Optional[str] = None
     num_channels: Optional[int] = None
     num_samples: Optional[int] = None
+    center_freq_hz: Optional[float] = None
+    sample_rate_hz: Optional[float] = None
 
 
 class State:
@@ -84,6 +94,8 @@ def status_payload() -> dict:
         "data_type": state.detected.data_type,
         "num_channels": state.detected.num_channels,
         "num_samples": state.detected.num_samples,
+        "center_freq_hz": state.detected.center_freq_hz,
+        "sample_rate_hz": state.detected.sample_rate_hz,
     }
 
 
@@ -154,7 +166,7 @@ async def subscriber_loop(cfg: Config):
                 await broadcast_error(f"frame too short for header: {len(raw)} bytes")
                 continue
 
-            num_samples, num_channels, data_type = HEADER.unpack_from(raw, 0)
+            center_freq, sample_rate, num_samples, num_channels, data_type = HEADER.unpack_from(raw, 0)
 
             if data_type not in DATA_TYPE_NAMES:
                 await broadcast_error(f"unknown data type in header: {data_type}")
@@ -164,16 +176,20 @@ async def subscriber_loop(cfg: Config):
                     f"invalid header: {num_samples} samples x {num_channels} channels"
                 )
                 continue
+            if not math.isfinite(center_freq) or not math.isfinite(sample_rate) or sample_rate <= 0:
+                await broadcast_error(
+                    f"invalid header: center_freq={center_freq} sample_rate={sample_rate}"
+                )
+                continue
 
             shape = (num_channels, num_samples, data_type)
+            status_changed = False
             if locked is None:
                 locked = shape
-                state.detected = Detected(
-                    data_type=DATA_TYPE_NAMES[data_type],
-                    num_channels=num_channels,
-                    num_samples=num_samples,
-                )
-                await broadcast_status()
+                state.detected.data_type = DATA_TYPE_NAMES[data_type]
+                state.detected.num_channels = num_channels
+                state.detected.num_samples = num_samples
+                status_changed = True
             elif shape != locked:
                 exp_ch, exp_sm, exp_ty = locked
                 await broadcast_error(
@@ -182,6 +198,16 @@ async def subscriber_loop(cfg: Config):
                     f"{num_samples} samples x {num_channels} channels ({DATA_TYPE_NAMES[data_type]})"
                 )
                 continue
+
+            # center_freq/sample_rate may legitimately change frame-to-frame
+            # (e.g. the SDR was retuned) without that being a framing error.
+            if state.detected.center_freq_hz != center_freq or state.detected.sample_rate_hz != sample_rate:
+                state.detected.center_freq_hz = center_freq
+                state.detected.sample_rate_hz = sample_rate
+                status_changed = True
+
+            if status_changed:
+                await broadcast_status()
 
             itemsize = DATA_TYPE_ITEMSIZE[data_type]
             expected_bytes = num_samples * num_channels * itemsize

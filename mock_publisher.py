@@ -1,11 +1,13 @@
 """Publishes synthetic complex RF data over a ZeroMQ PUB socket for testing
 the data-driven waterfall web service.
 
-Each message starts with a 4-byte little-endian header:
-    uint16 num_samples   - samples per RF channel
-    uint8  num_channels  - number of RF channels
-    uint8  data_type     - 0 = FFT (complex float32 spectrum bins)
-                            1 = TIME_DOMAIN (complex int16 IQ)
+Each message starts with a 12-byte little-endian header:
+    float32 center_freq_hz - tuner center frequency, in Hz
+    float32 sample_rate_hz - sample rate, in Hz
+    uint16  num_samples    - samples per RF channel
+    uint8   num_channels   - number of RF channels
+    uint8   data_type      - 0 = FFT (complex float32 spectrum bins)
+                              1 = TIME_DOMAIN (complex int16 IQ)
 followed by num_channels blocks of num_samples complex samples each,
 channel 0 first (non-interleaved), all little-endian.
 
@@ -21,7 +23,7 @@ import zmq
 
 DATA_TYPE_FFT = 0
 DATA_TYPE_TIME_DOMAIN = 1
-HEADER = struct.Struct("<HBB")
+HEADER = struct.Struct("<ffHBB")
 
 
 def main():
@@ -36,7 +38,8 @@ def main():
     p.add_argument("--channels", type=int, default=2, help="number of RF channels")
     p.add_argument("--samples", type=int, default=1024, help="samples per channel")
     p.add_argument("--rate", type=float, default=20.0, help="frames per second")
-    p.add_argument("--sample-rate", type=float, default=48000.0)
+    p.add_argument("--sample-rate", type=float, default=48000.0, help="sample rate in Hz, sent in the header")
+    p.add_argument("--center-freq", type=float, default=915e6, help="center frequency in Hz, sent in the header")
     args = p.parse_args()
 
     data_type = DATA_TYPE_FFT if args.type == "fft" else DATA_TYPE_TIME_DOMAIN
@@ -46,7 +49,8 @@ def main():
     sock.bind(args.bind)
     print(
         f"Publishing {args.type} data: {args.channels} ch x {args.samples} samples/ch "
-        f"@ {args.rate} fps on {args.bind}  (Ctrl+C to stop)"
+        f"@ {args.rate} fps, fc={args.center_freq/1e6:.3f} MHz, fs={args.sample_rate/1e3:.3f} kHz "
+        f"on {args.bind}  (Ctrl+C to stop)"
     )
     time.sleep(0.5)  # slow-joiner: give subscribers time to connect
 
@@ -59,7 +63,7 @@ def main():
     try:
         while True:
             loop_start = time.time()
-            header = HEADER.pack(n, args.channels, data_type)
+            header = HEADER.pack(args.center_freq, args.sample_rate, n, args.channels, data_type)
             blocks = []
             for ch in range(args.channels):
                 ts = t_total + np.arange(n) * dt
